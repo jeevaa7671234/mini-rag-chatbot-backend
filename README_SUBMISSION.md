@@ -49,7 +49,7 @@ Install [Tesseract OCR for Windows](https://github.com/UB-Mannheim/tesseract/wik
 
 Generate a fresh random JWT secret (`python -c "import secrets; print(secrets.token_urlsafe(32))"`) and paste it as `JWT_SECRET` in `.env`.
 
-The default LLM uses free local Ollama. Install [Ollama](https://ollama.com/), then:
+The default LLM uses free local Ollama. The local model name configured in `.env.example` is exactly `qwen2.5:3b`; do not pull one tag and configure a different tag. Install [Ollama](https://ollama.com/), then:
 
 ```powershell
 ollama pull qwen2.5:3b
@@ -73,9 +73,9 @@ python -m app.ingestion
 
 Running the ingestion command should print `Ingested 18 chunks with page and access metadata.` for these original PDFs. It extracts all seven originals, including the genuinely image-only `docs/exec/strategic_plan.pdf`. The resulting local Qdrant index is persisted under `data/qdrant/`. Keep the server stopped when rebuilding this local index to avoid local Qdrant file locks.
 
-**LLM provider choices:** Default is `LLM_PROVIDER=ollama`, `OLLAMA_BASE_URL=http://127.0.0.1:11434/v1`, `OLLAMA_MODEL=qwen2.5:3b` (no API credentials). Alternatively, set `LLM_PROVIDER=groq` and `GROQ_API_KEY=...` in `.env` for Groq's hosted free-tier API. The configured Groq model is `llama-3.3-70b-versatile`; change `GROQ_MODEL` if your account's supported models differ. The model interface is provider-independent (`ChatLLM` with `select_tool` / `stream`). Embeddings use `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions). Qdrant runs in local embedded mode, so a separate vector DB server is not required.
+**LLM provider choices:** Default is `LLM_PROVIDER=ollama`, `OLLAMA_BASE_URL=http://127.0.0.1:11434/v1`, `OLLAMA_MODEL=qwen2.5:3b` (no API credentials). Alternatively, set `LLM_PROVIDER=groq` and `GROQ_API_KEY=...` in `.env` for Groq's hosted free-tier API. The configured Groq model is `openai/gpt-oss-20b`; this is an active free-tier model with function-calling support as of October 2026; confirm availability in your Groq account before use. Unlike Ollama, it requires internet access and is subject to free-tier rate limits. Change `GROQ_MODEL` if the provider updates its catalog. The model interface is provider-independent (`ChatLLM` with `select_tool` / `stream`). Embeddings use `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions). Qdrant runs in local embedded mode, so a separate vector DB server is not required.
 
-**Never commit** `.env`, real API tokens, or the local vector index (`data/` is excluded from Git).
+**Never commit** `.env`, real API tokens, or the local vector index (`data/` is excluded from Git). See [`RUN_IN_VSCODE_WINDOWS.md`](RUN_IN_VSCODE_WINDOWS.md) for a copy-and-paste Windows setup, diagnostics, and model-compatibility checks.
 
 ## 2. Run the server
 
@@ -227,6 +227,8 @@ The demo PDF generator under `scripts/` exists **only for isolated tests**; it i
 ├── docs/{hr,finance,exec}/    # All SEVEN original policy PDFs
 ├── tests/                     # Contract, integration, OCR, security and async tests
 ├── scripts/create_demo_docs.py# Separate synthetic fixtures for isolated tests only
+├── scripts/check_environment.py # Read-only preflight for model/tag/OCR dependencies
+├── RUN_IN_VSCODE_WINDOWS.md     # Unpaid local setup and model compatibility
 ├── .github/workflows/tests.yml# Automated CI for offline checks
 ├── .env.example               # Non-secret configuration example
 ├── requirements.txt           # Runtime with Qdrant and semantic embeddings

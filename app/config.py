@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://127.0.0.1:11434/v1"
     ollama_model: str = "qwen2.5:3b"
     groq_api_key: SecretStr = SecretStr("")
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "openai/gpt-oss-20b"
     embedding_provider: Literal["sentence_transformers", "hashing"] = "sentence_transformers"
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     vector_store: Literal["qdrant", "sqlite"] = "qdrant"
