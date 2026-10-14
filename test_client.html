@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mini RAG WebSocket Test Client</title>
+<style>
+body{max-width:820px;margin:32px auto;padding:0 20px;font-family:system-ui,Arial,sans-serif;line-height:1.5;color:#192333}
+label{display:block;margin:12px 0 4px;font-weight:600}input{box-sizing:border-box;width:100%;padding:10px;border:1px solid #aaa;border-radius:5px}
+button{padding:10px 18px;margin-top:12px;cursor:pointer}#answer{white-space:pre-wrap;border:1px solid #ddd;border-radius:5px;min-height:100px;padding:14px;overflow-wrap:anywhere}#status{font-weight:600}
+small{display:block;color:#555}#send{margin-bottom:12px}
+</style></head><body>
+<h1>Mini RAG Test Client</h1>
+<p>This standalone client implements the assignment's first-frame JWT authentication and stream/done messages.</p>
+<label for="url">WebSocket URL</label><input id="url" value="ws://localhost:8000/ws/chat" spellcheck="false">
+<label for="token">Signed JWT</label><input id="token" type="password" placeholder="Paste token from python mint_tokens.py">
+<button id="connect">Connect</button><button id="disconnect" disabled>Disconnect</button>
+<p>Status: <span id="status">Not connected</span></p>
+<label for="question">Question</label><input id="question" placeholder="How many leave days do I get?" disabled>
+<button id="send" disabled>Send question</button><small>Press Enter to send. Responses are appended as the model streams real tokens.</small>
+<h2>Assistant</h2><div id="answer" role="status" aria-live="polite"></div>
+<script>
+let socket = null;
+const el = id => document.getElementById(id);
+function status(s){el('status').textContent=s}
+function connected(yes){el('connect').disabled=yes; el('disconnect').disabled=!yes;el('question').disabled=!yes;el('send').disabled=!yes}
+el('connect').onclick = () => {
+  const token = el('token').value.trim(); if(!token){status('Enter a JWT first');return}
+  socket = new WebSocket(el('url').value.trim());
+  socket.onopen = () => socket.send(JSON.stringify({type:'auth',token}));
+  socket.onmessage = event => {
+    let frame; try{frame=JSON.parse(event.data)}catch{return}
+    if(frame.type==='auth_success'){connected(true);status(`Authenticated ${frame.user_id} (${frame.department}, L${frame.level})`)}
+    else if(frame.type==='auth_failed'){status(`Auth failed: ${frame.message}`)}
+    else if(frame.type==='stream'){el('answer').textContent+=frame.text}
+    else if(frame.type==='done'){status('Response complete; connection remains open')}
+    else if(frame.type==='error'){el('answer').textContent+=`\n${frame.message}`}
+  };
+  socket.onclose = () => {connected(false); if(!el('status').textContent.startsWith('Auth failed'))status('Disconnected')};
+  socket.onerror = () => status('WebSocket connection failed');
+};
+el('disconnect').onclick=()=>{socket?.close();connected(false)};
+function send(){if(!socket||socket.readyState!==WebSocket.OPEN)return; const text=el('question').value.trim();if(!text)return;el('answer').textContent='';socket.send(JSON.stringify({type:'message',text}));el('question').value=''}
+el('send').onclick=send;
+el('question').onkeydown=e=>{if(e.key==='Enter')send()};
+</script></body></html>
