@@ -95,7 +95,7 @@ class MockLLM:
 
     async def select_tool(self, messages: list[dict]) -> dict | None:
         message = messages[-1]["content"]
-        query = message.lower().split("Question:", 1)[-1].split("RETRIEVED POLICY EXCERPTS", 1)[0]
+        query = message.lower().split("question:", 1)[-1].split("retrieved policy excerpts", 1)[0]
         if any(phrase in query for phrase in ("my manager", "my grade", "my team", "given my grade")):
             # Generate the exact same structure the OpenAI tool API returns.
             authenticated_id = re.search(r"^Authenticated user ID: (\S+)$", message, re.MULTILINE)

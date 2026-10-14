@@ -7,8 +7,6 @@ import io
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
 
 SAMPLE_TEXT: dict[str, str] = {
     "hr/leave_policy.pdf": (
@@ -72,14 +70,12 @@ def create_demo_pdfs(root: Path) -> None:
                 y += 65
             image.save(path, "PDF", resolution=160)
         else:
-            pdf = canvas.Canvas(str(path), pagesize=letter)
-            pdf.setFont("Helvetica", 11)
-            t = pdf.beginText(45, 750)
-            import textwrap
-            for line in textwrap.wrap(text, width=90):
-                t.textLine(line)
-            pdf.drawText(t)
-            pdf.save()
+            import fitz
+            pdf = fitz.open()
+            page = pdf.new_page(width=612, height=792)
+            page.insert_textbox(fitz.Rect(45, 42, 565, 730), text, fontsize=11, fontname="helv")
+            pdf.save(path)
+            pdf.close()
 
 
 def main() -> None:

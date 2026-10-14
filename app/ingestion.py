@@ -79,7 +79,7 @@ def chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) 
 
 
 def pages_from_pdf(path: Path) -> list[tuple[int, str]]:
-    """Native text first; OCR sparse/image pages with 2x DPI using installed Tesseract."""
+    """Native text first; OCR sparse/image pages at 3x resolution using installed Tesseract."""
     import fitz
     from PIL import Image
 
@@ -91,7 +91,7 @@ def pages_from_pdf(path: Path) -> list[tuple[int, str]]:
                 try:
                     import pytesseract
 
-                    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                    pix = page.get_pixmap(matrix=fitz.Matrix(3, 3), alpha=False)
                     image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                     ocr_text = normalize(pytesseract.image_to_string(image, config="--psm 3"))
                     if len(ocr_text) > len(text):
