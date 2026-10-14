@@ -1,221 +1,238 @@
-# Mini RAG Chatbot Backend - Submission
+# Mini RAG Chatbot Backend — Submission
 
-## Executive overview
+**FastAPI · WebSocket streaming · Qdrant · Local embeddings · PDF/OCR · JWT/RBAC · concurrent tools**
 
-This is a FastAPI WebSocket backend for answering company policy questions with **retrieval-time authorization**. It extracts page-linked content from normal and scanned PDFs, embeds chunks, stores vectors with required access metadata, retrieves only material visible to the JWT-authenticated user, allows the language model to invoke **one** employee-context tool, and streams actual model deltas over `/ws/chat`.
+## At a glance
 
-**Data availability notice:** The assignment instructions (`ASSIGNMENT_README.md`) were the **only** original file made available for this implementation. The seven employer PDFs, original `mint_tokens.py`, and original `test_client.html` were **not supplied**. This project includes newly written compatible replacements for the two helpers and an explicitly **fictional PDF generator** for local tests. Its synthetic policy text is not a claim about the employer's actual policies. For evaluation with real policy facts, place the original PDFs under `docs/` before ingestion. The PDF mappings and WebSocket wire protocol match the instructions.
+This is a deliberately small RAG backend for the **seven Acme Corp policy PDFs supplied with the assignment**. It reads both normal and image-only PDF pages; creates page-aware chunks with explicit permissions; indexes embeddings in Qdrant; retrieves under **database-enforced access controls**; allows an LLM to request one authenticated employee-context function; and streams actual model response deltas to the **unchanged employer-provided `test_client.html`**.
 
-## 1. Installation / prerequisites
+The supplied original documents are already in `docs/`. The original task is preserved as [`ASSIGNMENT_README.md`](ASSIGNMENT_README.md). No PDF generation or replacement is needed to evaluate the submission.
 
-- Python **3.11 or 3.12** recommended (3.10+ should work), `pip`, and an internet connection for the first package/model install.
-- Install **Tesseract OCR** system executable and ensure `tesseract --version` works in your terminal. This is needed automatically for scanned `exec/strategic_plan.pdf`; the `pytesseract` Python package alone is not sufficient.
-- Either [Ollama](https://ollama.com/) with a tool-capable model **or** a free Groq API key. You do not need both.
-- Qdrant is **embedded/local** through `qdrant-client` (no Docker or external Qdrant server required).
+### Trust boundary / architecture
 
-### Windows / PowerShell
+```text
+Input PDFs in docs/{hr,finance,exec}/
+      │ native text (PyMuPDF) or automatic 3x OCR (Tesseract)
+      ▼
+Page-bounded normalized text → 900-character chunks, 150-character overlap
+      │ allowlisted department + integer access level + source_file + page
+      ▼
+Local sentence-transformer embeddings → persistent Qdrant collection
+                                                     ▲
+WebSocket client ── JWT auth ── validated role ── Qdrant FILTERED similarity query
+      │                                              │
+      │             ONLY permitted policy text ───────┘
+      ▼
+OpenAI-compatible LLM adapter (Ollama or Groq)
+      ├─ optional tool call: get_employee_context(authenticated_user_id)
+      │       └─ asyncio.gather(profile, manager, team) ~1 sec total
+      └─ genuine provider delta stream → {"type":"stream","text":"..."} → {"type":"done"}
+```
+
+## 1. Install and run ingestion
+
+**Recommended:** Python 3.11 or 3.12, an internet connection for the initial model/package installation, and Tesseract OCR available on `PATH`. First run of sentence-transformers downloads a small pretrained model. No paid API or Docker is required with the default setup.
+
+### Windows (PowerShell)
+
+From the project root:
 
 ```powershell
 py -3.11 -m venv .venv
-.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 Copy-Item .env.example .env
-# Edit .env, especially JWT_SECRET.
-tesseract --version
-ollama pull qwen2.5:3b
 ```
 
-Install Tesseract separately and add the folder containing `tesseract.exe` to PATH. Restart the shell after changing PATH. Run `ollama serve` if Ollama is not already running.
+Install [Tesseract OCR for Windows](https://github.com/UB-Mannheim/tesseract/wiki) separately, add the directory containing `tesseract.exe` to your Windows `PATH`, then start a **new** PowerShell terminal and verify `tesseract --version`.
+
+Generate a fresh random JWT secret (`python -c "import secrets; print(secrets.token_urlsafe(32))"`) and paste it as `JWT_SECRET` in `.env`.
+
+The default LLM uses free local Ollama. Install [Ollama](https://ollama.com/), then:
+
+```powershell
+ollama pull qwen2.5:3b
+# Make sure Ollama is running (or use `ollama serve` if needed)
+python -m app.ingestion
+```
 
 ### Linux / macOS
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 cp .env.example .env
-# Edit .env and supply a long random JWT_SECRET.
-# Ubuntu: sudo apt-get install tesseract-ocr
+# Replace JWT_SECRET in .env with a random string.
+# Linux Ubuntu/Debian: sudo apt-get install tesseract-ocr
 # macOS with Homebrew: brew install tesseract
 ollama pull qwen2.5:3b
-```
-
-Set a different `JWT_SECRET` in `.env`, e.g. `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Do **not** commit `.env` or real tokens.
-
-### Choice of models and providers
-
-| Purpose | Default choice | Why |
-|---|---|---|
-| LLM | Ollama OpenAI-compatible API, `qwen2.5:3b` | Zero cloud keys/cost, supports OpenAI-format tool calls and real output streaming |
-| Optional hosted LLM | Groq `llama-3.3-70b-versatile` | Fast, free-tier-friendly, good function calling; set `LLM_PROVIDER=groq` and `GROQ_API_KEY` |
-| Embeddings | `sentence-transformers/all-MiniLM-L6-v2` (384-dimensional) | Local/free, compact, adequate semantic matching for a small policy corpus |
-| Vector database | Qdrant local mode | Real vector index, built-in boolean payload filters, easy to run without Docker |
-
-Both LLMs use the same `OpenAICompatibleLLM` interface, and the application code calls the abstract `select_tool` and `stream` methods. Changing `LLM_PROVIDER`/model does not affect chat orchestration. The embedding and vector-store adapters are also replaceable independently.
-
-**Real local run:** `LLM_PROVIDER=ollama`, `EMBEDDING_PROVIDER=sentence_transformers`, `VECTOR_STORE=qdrant` (these are already the `.env.example` defaults). If using Groq, edit only `LLM_PROVIDER` and `GROQ_API_KEY` (the same real Qdrant and embedding options work).
-
-**Strictly for automated tests / offline demo:** `LLM_PROVIDER=mock`, `EMBEDDING_PROVIDER=hashing`, `VECTOR_STORE=sqlite`. The mock is **not an LLM** and returns a visibly marked `[DEMO ONLY]` response; hashing is lexical (not semantic); SQLite uses SQL cosine distance with SQL `WHERE` ACL filtering, but is not an approximate-nearest-neighbor engine. Do not confuse this mode with validation of generative answer quality or with the production configuration.
-
-## 2. How to ingest the documents
-
-Copy the seven **real** PDFs into the exact paths:
-
-```
-docs/
-  hr/leave_policy.pdf
-  hr/code_of_conduct.pdf
-  hr/performance_review.pdf
-  finance/expense_policy.pdf
-  finance/travel_reimbursement.pdf
-  exec/compensation_committee.pdf
-  exec/strategic_plan.pdf
-```
-
-Then run from the project root:
-
-```bash
 python -m app.ingestion
 ```
 
-The script OCRs each page with less than 40 extractable characters using 2x-resolution Tesseract, splits pages into chunks, embeds in batches of 64, then replaces the existing vector collection. It prints the number of chunks ingested. The index persists under `data/qdrant/`. Stop the server before re-ingesting: local Qdrant uses an exclusive storage lock. Unknown PDFs fail ingestion **rather than being assigned an unsafe default permission**, and missing expected PDFs fail explicitly rather than creating an incomplete index.
+Running the ingestion command should print `Ingested 18 chunks with page and access metadata.` for these original PDFs. It extracts all seven originals, including the genuinely image-only `docs/exec/strategic_plan.pdf`. The resulting local Qdrant index is persisted under `data/qdrant/`. Keep the server stopped when rebuilding this local index to avoid local Qdrant file locks.
 
-**Only have the README?** For a self-contained evaluation of mechanics, you can instead create *clearly synthetic* fixtures with:
+**LLM provider choices:** Default is `LLM_PROVIDER=ollama`, `OLLAMA_BASE_URL=http://127.0.0.1:11434/v1`, `OLLAMA_MODEL=qwen2.5:3b` (no API credentials). Alternatively, set `LLM_PROVIDER=groq` and `GROQ_API_KEY=...` in `.env` for Groq's hosted free-tier API. The configured Groq model is `llama-3.3-70b-versatile`; change `GROQ_MODEL` if your account's supported models differ. The model interface is provider-independent (`ChatLLM` with `select_tool` / `stream`). Embeddings use `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions). Qdrant runs in local embedded mode, so a separate vector DB server is not required.
 
-```bash
-python scripts/create_demo_docs.py
-python -m app.ingestion
-```
+**Never commit** `.env`, real API tokens, or the local vector index (`data/` is excluded from Git).
 
-The generator intentionally refuses to overwrite existing PDF files. The strategic-plan sample is a genuine **image-only PDF** so OCR is exercised (not copied text masquerading as a scan). Do not submit fixture data as the employer's original content.
-
-## 3. Run server and test the exact WebSocket protocol
+## 2. Run the server
 
 ```bash
 python mint_tokens.py
 uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-Open `test_client.html` directly in a browser. Paste one printed token, leave `ws://localhost:8000/ws/chat`, click Connect, then ask a question. The client requires **no build step**. The provided original test client (once available) should also work because the message envelope is the specified one.
+`mint_tokens.py` generates properly signed expiring JWTs for exactly the three assignment users. Copy the relevant token into the provided browser client. `/health` is a basic process check, not proof that an external model is up or data is indexed.
 
-On a fresh connection the first client frame must be authentication:
+## 3. Test with the provided HTML client
+
+Double-click **`test_client.html`** (kept unchanged from the employer package). Set WebSocket URL to `ws://localhost:8000/ws/chat`, paste one JWT, click **Connect**, and ask questions. The client communicates with precisely the requested protocol.
+
+First client frame:
 
 ```json
-{"type":"auth","token":"<signed JWT from mint_tokens.py>"}
+{"type":"auth","token":"<JWT from mint_tokens.py>"}
 ```
 
-The server returns:
+Expected authentication response:
 
 ```json
 {"type":"auth_success","user_id":"emp-001","department":"hr","level":1}
 ```
 
-The client asks:
+Then:
 
 ```json
-{"type":"message","text":"How many leave days does the policy provide?"}
+{"type":"message","text":"How many days of annual leave do full-time employees receive?"}
 ```
 
-The real model returns multiple successive tokens/deltas and one terminal frame:
+Illustrative model token frames (exact token boundaries vary by provider):
 
 ```json
-{"type":"stream","text":"According to "}
-{"type":"stream","text":"the leave policy "}
-{"type":"stream","text":"[leave_policy.pdf p.1] ..."}
+{"type":"stream","text":"Full-time employees "}
+{"type":"stream","text":"receive 22 working days of paid annual leave "}
+{"type":"stream","text":"[leave_policy.pdf p.1]."}
 {"type":"done"}
 ```
 
-Those stream texts are **illustrative protocol examples, not guaranteed output**: text contents and delta sizes depend on the model and actual PDFs. Invalid, expired, or missing JWTs get `auth_failed` followed by a WebSocket policy close (`1008`). LLM and tool errors send a user-facing `stream` error followed by `done` while leaving the socket open. Successive authenticated messages work without reconnecting. `GET /health` reports process health only (not index/provider readiness).
+These are **protocol illustrations, not captured claims of a successful live provider invocation**. An invalid/expired/missing JWT instead receives `auth_failed` and a policy-close (1008). A provider or tool error produces a readable message and `done`, while leaving the socket available for another request.
 
-Useful access checks:
+### Useful assessment walkthrough
 
-| User | HR public (L1) | HR managers (L2) | Finance public (L1) | Exec confidential (L3) |
-|---|---|---|---|---|
-| `emp-001`: hr, L1 | Yes | No | No | No |
-| `mgr-002`: hr, L2 | Yes | Yes | No | No |
-| `exec-003`: exec, L3 | Yes | Yes | No | Yes |
+| JWT | Ask | What to verify |
+|---|---|---|
+| `emp-001` (HR L1) | “How many paid annual leave days?” | HR leave policy: **22 working days**, page 1 |
+| `emp-001` (HR L1) | “Tell me the private performance rating distribution.” | No disclosure of manager-only policy |
+| `mgr-002` (HR L2) | “What are the five performance rating categories?” | Manager policy can be retrieved and cited |
+| `exec-003` (Exec L3) | “What is the APAC investment in the scanned strategy?” | Strategic plan through OCR: **approximately USD 45 million** |
+| `exec-003` (Exec L3) | “What is the finance expense preapproval threshold?” | Should **not** disclose finance-only policy even though level is 3 |
+| Any | “Who is my manager?” | Tool returns the **mock** manager John Smith using 3 concurrent requests |
 
-A future finance user at L1 would see finance L1 **plus HR L1**, and not executive content.
+The first three user definitions are fixed by the assignment. A finance-L1 role is also explicitly tested in the suite to confirm the shared-HR exception.
+
+### Offline test without Ollama, Groq, or a Qdrant download
+
+For **protocol and access-control demonstration only**, change the following in `.env`:
+
+```dotenv
+LLM_PROVIDER=mock
+EMBEDDING_PROVIDER=hashing
+VECTOR_STORE=sqlite
+```
+
+Then run `python -m app.ingestion`, `python mint_tokens.py`, and `uvicorn app.main:app --reload` as above. This mode **does not generate policy answers**: it returns an unmistakable `[DEMO ONLY]` message or mock employee context. Hashing vectors are lexical and SQLite similarity is slower; this mode must not be presented as a production LLM / semantic embedding demo.
 
 ## 4. Chunking strategy and justification
 
-The unit is a **PDF page**, preserving `page` and `source_file` in every chunk for citation and review. Text is normalized and divided into windows of **900 characters**, with approximately **150 characters of overlap**. The splitter prefers paragraph breaks, then sentence endings, line/word boundaries late in the window. Pages are never combined. This is deliberately char-based rather than tokenizer-specific, keeping ingestion model-independent and readable for small policy PDFs. Roughly 900 characters capture several related policy sentences without swallowing whole documents; 150 characters carry context over a section boundary. Overlap is approximate when avoiding half-words. Short pages produce one chunk. OCR text uses exactly the same chunker.
+The chunking unit is one PDF **page**. Every chunk retains `department` (from the path), integer `access_level` (from a strict explicit file-to-level map), `source_file` (original basename), and one-based `page` for citations. Normalized page text is split into **900-character windows with ~150 characters of overlap**. The splitter prefers paragraph, sentence, line, then word boundaries late in the window; it never crosses pages.
 
-A production iteration should tune chunk sizes against real policies using grounded Q&A/recall tests and potentially split on section headings or tables; the chosen limits are an explained baseline, not claimed optimal.
+This deliberately favors clear policy clauses and citations over arbitrarily large snippets. A roughly 900-character slice fits several connected policy sentences; the overlap reduces loss when an entitlement or condition spans two slices. Page-specific metadata avoids incorrect page citations when searching PDFs with more than one page. The characters-based choice is model-agnostic; an improvement for longer complex policies would be section-, table-, and tokenizer-aware segmentation.
 
-## 5. Retrieval-time RBAC (central security decision)
+## 5. Retrieval-time RBAC (security-critical)
 
-Each chunk includes exactly the required data: `department` from folder, integer `access_level` from the explicit seven-file allowlist, `source_file`, and 1-based `page` (plus `text` for answering).
+The JWT is verified with HS256 and validated for required identity/role/time claims before chat is permitted. The client cannot set or override the department or level. The **vector database itself** receives this logical filter:
 
-Access is defined as:
-
-```
-(access_level <= authenticated_user.level)
+```text
+access_level <= authenticated_user.level
 AND
-(department == authenticated_user.department OR department == 'hr')
+(department == authenticated_user.department OR department == "hr")
 ```
 
-In `app/store.py`, the **Qdrant search call** passes a `models.Filter` with a mandatory range condition and nested OR department condition in the `query_filter=` parameter to `query_points(...)`. Filtering happens **inside Qdrant before similarity ranking and `limit`**, not by trimming `top_k` results afterward. The alternative SQLite test store enforces the same predicate in SQL `WHERE` before similarity sort/limit. This avoids irrelevant high-similarity restricted text entering the prompt and also avoids missing an authorized lower-ranked document due to post-filtering.
+In the Qdrant backend this is a `models.Filter` with a mandatory range condition and a nested `should` (OR) department filter, **passed directly in `query_points(query_filter=...)`**. Restricted chunks cannot enter the retrieval candidates, similarity ranking, top-K results, or LLM context. No Python list is fetched and filtered after similarity search. The optional SQLite test backend applies the identical predicate in its SQL `WHERE` clause, before similarity sorting and limiting.
 
-The JWT's `sub`, department, and level are validated server-side using HS256 signature and mandatory timestamps. WebSocket JSON cannot override them. A requested employee-context tool call is accepted **only for the authenticated JWT subject**; it cannot read another employee even if an LLM or prompt injection supplies a different ID.
+| Identity | HR level 1 | HR level 2 | Finance level 1 | Exec level 3 |
+|---|:---:|:---:|:---:|:---:|
+| `emp-001`, HR L1 | Yes | No | No | No |
+| `mgr-002`, HR L2 | Yes | Yes | No | No |
+| `exec-003`, Exec L3 | Yes | Yes | No | Yes |
+| Finance L1 (additional test) | Yes | No | Yes | No |
 
-## 6. Async requests, real streaming, and the parallel tool
+New PDF filenames without a defined access level cause ingestion to **fail closed**; they never silently default to public. Missing mandatory originals also prevent incomplete indexing. The tool's target `user_id` must exactly match the authenticated JWT subject; even a malicious model-generated function call cannot retrieve another employee's details.
 
-The LLM sees one JSON-schema function: `get_employee_context(user_id)`. Tool choice occurs via an asynchronous, short **non-streaming** model call with that schema; if selected, the application invokes the tool exactly once and streams the actual final answer via a second model call. This separates tool selection from user-facing token streaming, and works consistently across both Groq and Ollama. It costs an additional model round trip (an explicit tradeoff).
+## 6. Async/parallel approach and real streaming
 
-Within the tool, `asyncio.gather(_profile(user_id), _manager(user_id), _team(user_id))` starts all three mock operations together. Each sleeps for one second; the entire aggregation takes approximately **one second**, not three. The mocked response contains Jane Doe / Senior, John Smith, and Platform / size 8. It **does not** contain any current leave balance, and the system prompt explicitly forbids making one up.
+The LLM receives **one function**: `get_employee_context(user_id)`. The LLM can choose it with a JSON tool call when the user's question concerns a grade, manager, or team. Only the identity from the validated JWT can be used. The tool runs three mock services concurrently:
 
-WebSocket handling, network calls (`httpx.AsyncClient`), and tool calls are async. The synchronous sentence-transformer embed computation, SQLite operations, local Qdrant storage, and PDF processing are offloaded to worker threads or run in the separate ingestion CLI. **No synchronous I/O is performed in the WebSocket's `async def` event loop.** Streaming forwards provider SSE `delta.content` pieces as they arrive; it does not chunk a complete response to fake interactivity.
+```python
+profile, manager, team = await asyncio.gather(
+    _profile(user_id), _manager(user_id), _team(user_id)
+)
+```
 
-## 7. One improvement with more time
+Each coroutine awaits `asyncio.sleep(1)`; they run concurrently, making aggregate latency approximately **one second**, rather than three seconds from sequential requests. Its mock output is Jane Doe / Senior, John Smith, and Platform / team size 8. It does **not** contain a personal leave balance, so the prompt forbids inventing one.
 
-Add **evaluation-driven retrieval** using a labelled set of policy questions, section-aware/table-aware extraction, and a local reranker with measured retrieval recall and answer-grounding checks. The source PDFs were unavailable for evaluation in this implementation, so no measured retrieval accuracy is claimed.
+The LLM first makes a short **non-streaming** tool-selection call; if selected, it collects the tool result, then requests the final answer using `stream=true`. This second call's HTTP Server-Sent Event `delta.content` chunks are forwarded immediately as WebSocket `stream` frames. It is **not** a fake word-by-word playback of an already completed LLM answer. `httpx.AsyncClient` handles network I/O without blocking. CPU-heavy embeddings and synchronous local vector DB operations are offloaded with `asyncio.to_thread`; PDF extraction runs in the ingestion CLI and off the WebSocket event loop.
 
-## 8. One deliberate tradeoff
+## 7. One improvement given more time
 
-**Local, small, free dependencies over highly scalable operations.** Embedded Qdrant + a 384D CPU model gives reviewers a realistic filtered vector store without Docker, a database account, or embedding API costs. The compromise is model-download/setup overhead, limited concurrency for local Qdrant, and lower semantic recall than larger models or hybrid search. A second tradeoff is a two-pass model invocation for reliable portable tool calling (see §6).
+Build a **measured answer-grounding and retrieval evaluation set** from the employer documents: questions with gold source pages (including OCR and negative access cases), then compare top-K recall, answer citation fidelity, and refusal quality with section-aware chunking and optionally hybrid lexical+dense retrieval or a lightweight reranker. Automated tests here establish *mechanics and controls*, not an unmeasured guarantee of LLM accuracy.
 
-## Test coverage, reproducibility, and limitations
+## 8. One deliberate tradeoff and why
+
+**Embedded local Qdrant plus compact CPU-friendly embeddings** were chosen for free, reproducible review without Docker or SaaS accounts. The tradeoff is local DB locking/multi-process limitations, initial model download, and potentially lower recall than larger/hybrid systems. A second conscious tradeoff is the two-pass LLM flow for cross-provider tool compatibility, at the cost of an extra model round trip. For a deployed company system, host Qdrant as a managed or networked service, use `wss://`, add audit logging and explicit user/tenant authorization, secret rotation, and request rate limits.
+
+## Verification evidence and limitations
+
+Run the automated suite with a minimal lightweight environment:
 
 ```bash
-python -m pip install -r requirements-dev.txt
+python -m pip install -r requirements-test.txt
 python -m pytest -q
 ```
 
-The tests exercise JWT success/failure, socket authentication order, WebSocket streaming/continued connection, lexical-vector SQL **query-time** RBAC for HR L1/L2, finance L1 and exec L3, forbidden cross-user tool calls, genuine image-only PDF OCR, PDF ACL validation, chunking, tool parallel elapsed time, and mock HTTP SSE chunk forwarding. They **do not use paid services** or require real policy documents. A full live Groq/Ollama and embedded-Qdrant smoke run with the employer's PDFs should also be performed before submitting to the recruiter; it was not possible to verify external LLM availability or the missing original policy corpus here.
+The suite covers signed and expired JWTs, first-frame authentication enforcement, WebSocket message/stream/done behavior, repeated requests and redacted LLM/tool errors, fake provider SSE deltas, malicious cross-identity tool requests, parallel elapsed time, OCR on both generated fixtures **and the original scanned PDF**, ingestion metadata and source facts, Qdrant query filter **construction** (using a lightweight contract double), plus SQLite SQL-layer filtering of all original documents. A [GitHub Actions workflow](.github/workflows/tests.yml) runs the same tests with Tesseract installed. Three earlier development commits plus the final integration commits are included in the ZIP's Git history.
 
-The project is intentionally **small scale**. Not implemented: conversation memory across connections, tenant separation, automated credential rotation, rate limiting, systematic answer evaluation, or multi-worker vector-store operations. These would be necessary for a real enterprise rollout. For actual production use, deploy Qdrant as a service instead of local mode, harden audit/auth, redact private data from logs, and use secure WebSockets (`wss://`).
+**Verified in this environment:** all **22 automated tests passed**; OCR recovered text from the original scanned strategy; the original seven PDFs produced **18 indexed chunks** in the offline SQL index; and a separately launched Uvicorn WebSocket server successfully handled original-client protocol frames for valid and invalid JWTs, continued between questions, streamed multiple frames, returned parallel mock-tool data, and rejected an invalid token with close code 1008.
 
-### Suggested demo questions
+**Not verified here:** an actual live answer from Ollama/Groq, a downloaded sentence-transformer inference run, or execution against the installed Qdrant package, because external package downloads and a live model service were unavailable. The Qdrant filter call is also tested via a fake client. The real-provider setup is implemented and documented, but run at least one actual provider+Qdrant smoke test on a machine with dependencies installed before representing generative-answer quality as validated. The system prompt requires retrieved, authorized evidence and citations; a generative model can still be mistaken, so accurate policy answers are not guaranteed.
 
-- As `emp-001`: “What is the leave policy?” then “What happens in managers' performance calibration?” The second must **not** cite private manager text.
-- As `mgr-002`: “Describe the performance review process.”
-- As `exec-003`: “What does the scanned strategic plan say about Redwood?” (the **synthetic** scan exercises OCR).
-- As `exec-003`: “What is the finance expense policy?” The system must **not** reveal finance content despite the user's high level, because department restrictions still apply.
-- As any authenticated user: “Who is my manager?” This exercises the single tool's concurrent mock calls.
+The demo PDF generator under `scripts/` exists **only for isolated tests**; it is never invoked in the normal ingestion path and deliberately refuses to overwrite any of the employer-supplied documents. In contrast, `docs/` contains the original employer PDFs as provided. The browser test client is the unmodified employer file.
 
-## Project layout
+## Source layout
 
+```text
+.
+├── app/
+│   ├── main.py                # WebSocket protocol, JWT handshake, errors
+│   ├── security.py            # Signature/expiry/role validation
+│   ├── chat.py                # ACL-aware retrieval, prompt, tool orchestration
+│   ├── llm.py                 # Real async SSE adapters for Ollama/Groq; marked mock
+│   ├── tools.py               # Three concurrent mock services; single function schema
+│   ├── embeddings.py          # Sentence-transformers + deterministic test vectors
+│   ├── store.py               # Qdrant query-filtered vectors + SQL test alternative
+│   ├── ingestion.py           # Original PDF text/OCR, chunks and CLI
+│   └── config.py              # Environment settings
+├── docs/{hr,finance,exec}/    # All SEVEN original policy PDFs
+├── tests/                     # Contract, integration, OCR, security and async tests
+├── scripts/create_demo_docs.py# Separate synthetic fixtures for isolated tests only
+├── .github/workflows/tests.yml# Automated CI for offline checks
+├── .env.example               # Non-secret configuration example
+├── requirements.txt           # Runtime with Qdrant and semantic embeddings
+├── requirements-test.txt      # Lightweight test-only environment
+├── mint_tokens.py             # Signed test-user JWTs
+├── test_client.html           # Employer's original browser test client
+├── ASSIGNMENT_README.md       # Employer's original problem statement
+└── README_SUBMISSION.md       # This document
 ```
-app/
-  main.py          # WS frames, JWT handshake, streaming, errors
-  security.py      # signed JWT verification / role claims
-  chat.py          # grounded prompt, filtered retrieval, model tool flow
-  llm.py           # Groq/Ollama async provider + offline test mock
-  store.py         # Qdrant filtered vectors / SQL filtered test backend
-  embeddings.py    # local sentence-transformers / offline lexical hashes
-  ingestion.py     # ACL map, PDF text+OCR, chunking, embedding CLI
-  tools.py         # asyncio.gather employee context tool
-scripts/create_demo_docs.py  # explicitly fictional, includes image-only scan
-mint_tokens.py              # signed short-lived test user tokens
-test_client.html            # no-build browser client
-README_SUBMISSION.md        # this document
-ASSIGNMENT_README.md        # uploaded instruction text
-requirements*.txt
-.env.example
-.gitignore
-```
-
-### Development commits
-
-See the Git commit history included with the submission. This is **real local Git history** for the implementation and validation stages, not a claim of multiple days' work. The original assignment README and synthetic helper are disclosed rather than presented as supplied company files.

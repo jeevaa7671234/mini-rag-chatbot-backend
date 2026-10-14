@@ -1,7 +1,11 @@
 # Mini RAG Chatbot Backend
 
-**Start with [README_SUBMISSION.md](README_SUBMISSION.md)** for complete setup, architecture, security decisions, tests, and disclosures about unavailable original PDFs.
+FastAPI · WebSocket token streaming · Qdrant retrieval-time RBAC · local semantic embeddings · scanned PDF OCR · concurrent employee-context tool.
 
-Core entrypoints: `python -m app.ingestion`, `uvicorn app.main:app --reload`, `python mint_tokens.py`, and `test_client.html`.
+**[Start here: README_SUBMISSION.md](README_SUBMISSION.md)** — installation, Windows/Linux setup, ingestion, server/client testing, RBAC rationale, async design, verification matrix, and limitations.
 
-The uploaded assignment only contained the README. A generator for **synthetic** demo PDFs is in `scripts/create_demo_docs.py`. Replace them with original PDFs for real-policy evaluation.
+All **seven original Acme Corp assessment PDFs** are included under `docs/`. The unchanged employer-provided browser client is `test_client.html`, and the task statement is archived in `ASSIGNMENT_README.md`.
+
+Run: `python -m app.ingestion` → `python mint_tokens.py` → `uvicorn app.main:app --reload` → open `test_client.html`.
+
+Run offline tests: `python -m pip install -r requirements-test.txt` → `python -m pytest -q`.
